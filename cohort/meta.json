@@ -1,0 +1,11 @@
+{
+  "seed": 42,
+  "n_over5_discovery": 8126,
+  "n_usable_with_t1_path": 7996,
+  "grm_prefix": "/data484_4/txia2/AGENT/grm_subset_king/king_over5_gcta_discovery",
+  "volume_manifest": "/data484_4/txia2/gwas_practice/individual_phenos/z_graph_fusion_residual_distill/volume_manifest.csv",
+  "ccovar": "/data484_4/txia2/gwas_practice/T1_ccovar_discovery",
+  "qcovar": "/data484_4/txia2/gwas_practice/T1_qcovar_discovery",
+  "n_train": 3998,
+  "n_val": 3998
+}

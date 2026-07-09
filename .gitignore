@@ -42,3 +42,13 @@ cache/
 # IDE
 .vscode/
 .idea/
+
+# Cohort — large or subject-ID files (UK Biobank restricted)
+cohort/*.grm.*
+cohort/*_grm.npy
+cohort/*_eids.txt
+cohort/*_cohort.csv
+
+# GCTA eval — per-subject z values and raw GCTA outputs
+results/*/gcta_eval/*/pca_features/
+results/*/gcta_eval/*/gcta_hereg_out/
