@@ -9,8 +9,6 @@ __pycache__/
 T1_128/
 T2_128/
 output/
-gcta_eval/
-csv_logs/
 lightning_logs/
 checkpoints/
 *.ckpt
@@ -26,11 +24,12 @@ checkpoints/
 
 # Cache / data
 cache/
-*.npy
-*.npz
 *.pkl
 *.h5
 *.hdf5
+
+# Large numpy arrays (GRM matrices — too big for GitHub)
+cohort/*_grm.npy
 
 # Logs
 *.log
