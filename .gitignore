@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# Training outputs (large, kept on disk separately)
+T1_128/
+T2_128/
+output/
+gcta_eval/
+csv_logs/
+lightning_logs/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# GCTA / genetics intermediate files
+*.grm.bin
+*.grm.id
+*.grm.N.bin
+*.log
+*.nosex
+
+# Cache / data
+cache/
+*.npy
+*.npz
+*.pkl
+*.h5
+*.hdf5
+
+# Logs
+*.log
+/tmp/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
