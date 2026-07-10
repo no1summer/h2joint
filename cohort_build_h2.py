@@ -37,8 +37,13 @@ GRM_PREFIX = "/data484_4/txia2/AGENT/grm_subset_king/king_over5_gcta_discovery"
 VOLUME_MANIFEST = "/data484_4/txia2/gwas_practice/individual_phenos/z_graph_fusion_residual_distill/volume_manifest.csv"
 CCOVAR_PATH = "/data484_4/txia2/gwas_practice/T1_ccovar_discovery"
 QCOVAR_PATH = "/data484_4/txia2/gwas_practice/T1_qcovar_discovery"
+KING_KIN0 = "/data484_4/txia2/gwas_practice/KING/king_output.kin0"  # pairwise KING kinship
 CACHE_DIR = Path("/data484_4/txia2/DeepENDO/training/T1_128/h2_joint_cohort")
 SEED = 42
+# Kinship threshold for clustering: 0.0221 ≈ 3rd-degree relatives.
+# All subjects in the same kinship cluster are assigned to the same split
+# so that train and val GRMs have no cross-split genetic covariance.
+KINSHIP_SPLIT_THRESHOLD = 0.0221
 
 # Age, sex, age^2, sex x age (+ sex x age^2), 10 ancestry PCs, ICV/head-size and
 # scanner-related UKB fields -- all already present in T1_qcovar_discovery.
@@ -93,6 +98,66 @@ def _build_covar_design(eids_ordered: list, ccovar: pd.DataFrame, qcovar: pd.Dat
     return X.astype(np.float32)
 
 
+def _kinship_split(usable_positions, df_id, kin0_path, threshold, seed):
+    """
+    Split subjects into train/val so that all subjects in the same kinship
+    cluster (KING kinship > threshold) land in the same split.
+
+    Algorithm:
+      1. Build a union-find over usable subjects.
+      2. Read the pairwise KING kin0 file; union any usable pair with kinship > threshold.
+      3. Extract connected components (clusters).
+      4. Sort clusters largest-first; greedily assign each to whichever split is
+         currently smaller, breaking ties by RNG → balanced ~50/50 split.
+    """
+    from collections import defaultdict
+
+    usable_eids = set(str(df_id.iloc[p]["IID"]) for p in usable_positions)
+    pos_by_eid  = {str(df_id.iloc[p]["IID"]): p for p in usable_positions}
+
+    # Union-Find
+    parent = {e: e for e in usable_eids}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    # Read only relevant columns; filter to usable-subject pairs above threshold
+    kin = pd.read_csv(kin0_path, sep="\t", usecols=["ID1", "ID2", "Kinship"],
+                      dtype={"ID1": str, "ID2": str, "Kinship": float})
+    related = kin[(kin["Kinship"] > threshold) &
+                  kin["ID1"].isin(usable_eids) & kin["ID2"].isin(usable_eids)]
+    for _, row in related.iterrows():
+        union(row["ID1"], row["ID2"])
+    n_pairs = len(related)
+
+    # Collect clusters
+    clusters = defaultdict(list)
+    for e in usable_eids:
+        clusters[find(e)].append(e)
+    clusters = sorted(clusters.values(), key=len, reverse=True)  # largest first
+
+    # Greedy balanced assignment
+    rng = np.random.default_rng(seed)
+    train_eids_set, val_eids_set = set(), set()
+    for cluster in clusters:
+        if len(train_eids_set) < len(val_eids_set):
+            train_eids_set.update(cluster)
+        elif len(val_eids_set) < len(train_eids_set):
+            val_eids_set.update(cluster)
+        else:
+            (train_eids_set if rng.random() < 0.5 else val_eids_set).update(cluster)
+
+    train_pos = np.sort([pos_by_eid[e] for e in train_eids_set])
+    val_pos   = np.sort([pos_by_eid[e] for e in val_eids_set])
+    print(f"[cohort_build_h2] Kinship split (threshold={threshold}): "
+          f"{len(related)} related pairs clustered → "
+          f"train={len(train_pos)}, val={len(val_pos)}")
+    return train_pos, val_pos
+
+
 def build_or_load(cache_dir: Path = CACHE_DIR, seed: int = SEED, force: bool = False) -> dict:
     cache_dir.mkdir(parents=True, exist_ok=True)
     if not force and all(p.is_file() for p in _required_files(cache_dir)):
@@ -120,15 +185,15 @@ def build_or_load(cache_dir: Path = CACHE_DIR, seed: int = SEED, force: bool = F
         f"both a T1 path (volume_manifest.csv) and covariate coverage (ccovar/qcovar)."
     )
 
-    rng = np.random.default_rng(seed)
-    shuffled = usable_positions.copy()
-    rng.shuffle(shuffled)
-    half = len(shuffled) // 2
-    train_pos = np.sort(shuffled[:half])
-    val_pos = np.sort(shuffled[half:])
+    train_pos, val_pos = _kinship_split(
+        usable_positions, df_id, KING_KIN0, KINSHIP_SPLIT_THRESHOLD, seed
+    )
 
     meta = {
         "seed": seed,
+        "split_method": "kinship_cluster",
+        "kinship_split_threshold": KINSHIP_SPLIT_THRESHOLD,
+        "king_kin0": KING_KIN0,
         "n_over5_discovery": int(len(df_id)),
         "n_usable_with_t1_path": int(len(usable_positions)),
         "grm_prefix": GRM_PREFIX,
