@@ -45,7 +45,7 @@ from run_idp_pipeline_king_hereg import run_hereg_on_features, KinPreset  # noqa
 # ── paths & hyperparameters ───────────────────────────────────────────────────
 
 PRETRAINED_CKPT = "/data484_4/txia2/DeepENDO/training/T1_128/epoch=39-train_loss=0.265290-val_loss=0.291595.ckpt"
-DIR_NAME    = "/data484_4/txia2/DeepENDO/training/T1_128/output/cnn_h2joint_C"
+DIR_NAME    = "/data484_4/txia2/h2joint/output/cnn_h2joint_C"
 GCTA_BIN    = "/data4012/zxie3/gcta/gcta-1.94.1-linux-kernel-3-x86_64/gcta-1.94.1"
 CCOVAR_PATH = "/data484_4/txia2/gwas_practice/T1_ccovar_discovery"
 QCOVAR_PATH = "/data484_4/txia2/gwas_practice/T1_qcovar_discovery"
@@ -248,6 +248,33 @@ class engine_AE_H2Joint_C(pl.LightningModule):
 
         return h2
 
+    # ── queue warm-up ─────────────────────────────────────────────────────────
+
+    def on_fit_start(self):
+        """Pre-fill both half-queues and SVDs from the loaded encoder before epoch 0."""
+        if bool(self.queue_filled.all()):
+            return
+        print("\nPre-warming SVD queue from encoder weights...", flush=True)
+        self.eval()
+        dl = self.trainer.train_dataloader
+        with torch.no_grad():
+            for batch in dl:
+                x, _mask, eids = batch
+                x = x.to(self.device)
+                _, z = self(x)
+                z = z.float()
+                idx_t = torch.as_tensor(
+                    [self.train_eid_to_idx[e] for e in eids],
+                    device=self.device, dtype=torch.long,
+                )
+                self.queue_h[idx_t] = z[:, :HALF_DIM]
+                self.queue_r[idx_t] = z[:, HALF_DIM:]
+                self.queue_filled[idx_t] = True
+        self._refresh_svd("h")
+        self._refresh_svd("r")
+        self.train()
+        print("Queue warm-up done. SVD ready.", flush=True)
+
     # ── training ──────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx_pl):
@@ -266,13 +293,26 @@ class engine_AE_H2Joint_C(pl.LightningModule):
         self.queue_filled[idx_t] = True
         lambda_t   = self.current_lambda()
         queue_full = bool(self.queue_filled.all())
+        svd_ready  = bool(self.svd_ready_h) and bool(self.svd_ready_r)
 
         h2_h = z_h.sum() * 0.0   # zero placeholder, stays in graph
         h2_r = z_r.sum() * 0.0
+        h2_h_log = torch.zeros(1, device=z.device, dtype=torch.float32)
+        h2_r_log = torch.zeros(1, device=z.device, dtype=torch.float32)
 
-        if lambda_t > 0.0 and queue_full and bool(self.svd_ready_h) and bool(self.svd_ready_r):
-            h2_h = self._he_for_half(z_h, idx_t, "h")
-            h2_r = self._he_for_half(z_r, idx_t, "r")
+        if queue_full and svd_ready:
+            if lambda_t > 0.0:
+                h2_h = self._he_for_half(z_h, idx_t, "h")
+                h2_r = self._he_for_half(z_r, idx_t, "r")
+                h2_h_log = h2_h.detach()
+                h2_r_log = h2_r.detach()
+            else:
+                # Warmup: monitor only, no gradient
+                with torch.no_grad():
+                    h2_h_log = self._he_for_half(z_h.detach(), idx_t, "h")
+                    h2_r_log = self._he_for_half(z_r.detach(), idx_t, "r")
+                    self.queue_h[idx_t] = z_h.detach().float()
+                    self.queue_r[idx_t] = z_r.detach().float()
         else:
             with torch.no_grad():
                 self.queue_h[idx_t] = z_h.detach().float()
@@ -286,8 +326,8 @@ class engine_AE_H2Joint_C(pl.LightningModule):
         loss = recon_loss - lambda_t * h2_h + lambda_t * h2_r
         self.log("train_loss",      loss,      prog_bar=True,  on_epoch=True)
         self.log("train_recon_loss", recon_loss, prog_bar=False, on_epoch=True)
-        self.log("train_h2_h",       h2_h,      prog_bar=True,  on_epoch=True)
-        self.log("train_h2_r",       h2_r,      prog_bar=True,  on_epoch=True)
+        self.log("train_h2_h",       h2_h_log,  prog_bar=True,  on_epoch=True)
+        self.log("train_h2_r",       h2_r_log,  prog_bar=True,  on_epoch=True)
         self.log("lambda_h2",        lambda_t,  prog_bar=False, on_epoch=True)
         return loss
 
