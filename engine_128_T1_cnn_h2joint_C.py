@@ -250,30 +250,34 @@ class engine_AE_H2Joint_C(pl.LightningModule):
 
     # ── queue warm-up ─────────────────────────────────────────────────────────
 
-    def on_fit_start(self):
-        """Pre-fill both half-queues and SVDs from the loaded encoder before epoch 0."""
+    def warmup_queue(self, dataloader, device="cuda"):
+        """One no-grad pass to pre-fill both half-queues and SVDs.
+        Call BEFORE trainer.fit() — PL 2.x exposes the dataloader too late for on_fit_start.
+        """
         if bool(self.queue_filled.all()):
             return
-        print("\nPre-warming SVD queue from encoder weights...", flush=True)
-        self.eval()
-        dl = self.trainer.train_dataloader
+        print(f"\nPre-warming SVD queue on {device} ...", flush=True)
+        self.to(device).eval()
         with torch.no_grad():
-            for batch in dl:
+            for batch in dataloader:
                 x, _mask, eids = batch
-                x = x.to(self.device)
+                x = x.to(device)
                 _, z = self(x)
                 z = z.float()
                 idx_t = torch.as_tensor(
                     [self.train_eid_to_idx[e] for e in eids],
-                    device=self.device, dtype=torch.long,
+                    device=device, dtype=torch.long,
                 )
-                self.queue_h[idx_t] = z[:, :HALF_DIM]
-                self.queue_r[idx_t] = z[:, HALF_DIM:]
+                self.queue_h[idx_t] = z[:, :HALF_DIM].cpu()
+                self.queue_r[idx_t] = z[:, HALF_DIM:].cpu()
                 self.queue_filled[idx_t] = True
         self._refresh_svd("h")
         self._refresh_svd("r")
         self.train()
-        print("Queue warm-up done. SVD ready.", flush=True)
+        K = self.train_grm.cpu(); K_diag = self.train_grm_diag.cpu(); he_d = self.train_he_denom.cpu()
+        h2_h = he_loss_svd.he_total_from_L(self.svd_L_h.cpu(), K, K_diag, he_d, self.n_train, self.n_covar)
+        h2_r = he_loss_svd.he_total_from_L(self.svd_L_r.cpu(), K, K_diag, he_d, self.n_train, self.n_covar)
+        print(f"Queue warm-up done. Baseline H_h={h2_h.item():.2f}  H_r={h2_r.item():.2f}", flush=True)
 
     # ── training ──────────────────────────────────────────────────────────────
 
@@ -480,6 +484,12 @@ if __name__ == "__main__":
         missing, unexpected = AE_model.load_state_dict(ckpt["state_dict"], strict=False)
         print(f"  missing: {missing}")
         print(f"  unexpected: {unexpected}")
+
+    _warmup_dl = torch.utils.data.DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, pin_memory=True,
+        num_workers=12, shuffle=False,
+    )
+    AE_model.warmup_queue(_warmup_dl, device="cuda:0")
 
     trainer.fit(AE_model, train_dataloaders=train_dataloader,
                 val_dataloaders=val_dataloader, ckpt_path=_resume)

@@ -60,7 +60,7 @@ LEARNING_RATE = 0.0005248074602497723
 BATCH_SIZE    = 18
 HIDDEN_DIM    = 128       # encoder bottleneck (unchanged)
 PROJ_DIM      = HIDDEN_DIM  # use full encoder output directly (no project_head)
-SVD_MODES     = 64        # retained SVD modes (m); H_total bounded by this; captures ~98% of 128-dim latent variance
+SVD_MODES     = PROJ_DIM  # use full 128-dim space so H_total matches GCTA's 128-feature estimate
 
 WARMUP_EPOCHS        = 2
 RAMP_EPOCHS          = 5
@@ -232,31 +232,39 @@ class engine_AE_H2Joint_A(pl.LightningModule):
 
     # ── queue warm-up ─────────────────────────────────────────────────────────
 
-    def on_fit_start(self):
-        """Pre-fill the queue and SVD from the loaded encoder before epoch 0.
+    def warmup_queue(self, dataloader, device="cuda"):
+        """One no-grad pass over training data to pre-fill queue + SVD.
 
-        Ensures train_h2 reflects the pretrained baseline (~35) from the very
-        first step rather than warming up from 0 over two epochs.
+        Call this BEFORE trainer.fit() so train_h2 at epoch 0 reflects the
+        pretrained encoder's heritable structure (~35) rather than cold-starting
+        from 0.  Not called via on_fit_start because PL 2.x exposes the
+        dataloader too late at that hook.
         """
         if bool(self.queue_filled.all()):
-            return  # already filled (e.g. resumed from a checkpoint mid-epoch)
-        print("\nPre-warming SVD queue from encoder weights...", flush=True)
-        self.eval()
-        dl = self.trainer.train_dataloader
+            return
+        print(f"\nPre-warming SVD queue on {device} ...", flush=True)
+        self.to(device).eval()
         with torch.no_grad():
-            for batch in dl:
+            for batch in dataloader:
                 x, _mask, eids = batch
-                x = x.to(self.device)
+                x = x.to(device)
                 _, z = self(x)
                 idx_t = torch.as_tensor(
                     [self.train_eid_to_idx[e] for e in eids],
-                    device=self.device, dtype=torch.long,
+                    device=device, dtype=torch.long,
                 )
-                self.queue_proj[idx_t] = z.float()
+                self.queue_proj[idx_t] = z.float().cpu()
                 self.queue_filled[idx_t] = True
         self._refresh_svd()
         self.train()
-        print("Queue warm-up done. SVD ready.", flush=True)
+        # Report the baseline h2 so we can confirm it starts near 35
+        K      = self.train_grm.cpu()
+        K_diag = self.train_grm_diag.cpu()
+        h2_0 = he_loss_svd.he_total_from_L(
+            self.svd_L.cpu(), K, K_diag,
+            self.train_he_denom.cpu(), self.n_train, self.n_covar,
+        )
+        print(f"Queue warm-up done. Baseline H_total = {h2_0.item():.2f}", flush=True)
 
     # ── training ──────────────────────────────────────────────────────────────
 
@@ -467,6 +475,15 @@ if __name__ == "__main__":
         missing, unexpected = AE_model.load_state_dict(ckpt["state_dict"], strict=False)
         print(f"  missing: {missing}")
         print(f"  unexpected: {unexpected}")
+
+    # Pre-warm queue from current encoder weights so train_h2 starts near the
+    # pretrained baseline (~35) rather than cold-starting at 0.
+    # Use a shuffle=False loader so all subjects are covered in a single pass.
+    _warmup_dl = torch.utils.data.DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, pin_memory=True,
+        num_workers=12, shuffle=False,
+    )
+    AE_model.warmup_queue(_warmup_dl, device="cuda:0")
 
     trainer.fit(AE_model, train_dataloaders=train_dataloader,
                 val_dataloaders=val_dataloader, ckpt_path=_resume)
